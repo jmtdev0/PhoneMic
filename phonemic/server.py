@@ -1,19 +1,28 @@
-"""HTTPS + WebSocket server: serves the phone page and feeds the incoming audio to the output device.
+"""HTTPS + WebSocket server: serves the phone page, pairs phones and feeds their audio to the output device.
 
-Protocol (WebSocket at /ws):
-  1. The phone sends a text message {"type": "hello", "code": "123456", "sampleRate": 48000}.
-  2. The server answers {"type": "ready"} or {"type": "error", "reason": ...} and closes on errors.
-  3. The phone then sends binary messages of little-endian int16 mono PCM at that sample rate.
-  4. Every couple of seconds the server sends {"type": "stats", ...} for the phone to display.
-Close codes: 4400 malformed hello, 4401 wrong code, 4409 replaced by a newer connection, 4500 audio error.
+WebSocket at /ws. The phone first sends a text "hello" and is accepted in one of two ways:
+  * Browser page: {"type": "hello", "code": "123456", "sampleRate": 48000} with the pairing code shown on the PC.
+  * Paired app:   {"type": "hello", "device": "<id>", "sampleRate": 48000}. The server answers
+    {"type": "challenge", "nonce": "<hex>"} and the phone replies {"type": "auth", "signature": "<base64 DER ECDSA>"}
+    over the nonce, using the private key that never left the phone.
+The server then answers {"type": "ready"} (or {"type": "error", "reason": ...} and closes) and the phone streams binary
+messages of little-endian int16 mono PCM at the announced sample rate. Every couple of seconds the server sends
+{"type": "stats", ...}.
+Close codes: 4400 malformed message, 4401 wrong code or signature, 4403 unknown or revoked device,
+4409 replaced by a newer connection, 4500 audio error.
+
+POST /enroll swaps a one-time pairing token for a permanent device identity (see devices.py).
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hmac
 import ipaddress
 import logging
+import secrets
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,6 +30,7 @@ from typing import Callable, Protocol
 
 from aiohttp import WSMsgType, web
 
+from .devices import DeviceRegistry, EnrollmentTokens, clean_name
 from .pcm_queue import PcmQueue
 
 log = logging.getLogger("phonemic")
@@ -28,7 +38,7 @@ log = logging.getLogger("phonemic")
 WEB_DIR = Path(__file__).parent / "web"
 DEFAULT_APK = Path(__file__).resolve().parent.parent / "android" / "app" / "build" / "outputs" / "apk" / "debug" / "app-debug.apk"
 HELLO_TIMEOUT_S = 10
-AUTH_FAIL_DELAY_S = 1  # slows down code guessing
+AUTH_FAIL_DELAY_S = 1  # slows down guessing
 STATS_INTERVAL_S = 2.0
 MAX_FAILED_ATTEMPTS = 5
 LOCKOUT_SECONDS = 60
@@ -56,7 +66,7 @@ class PairingGuard:
     """Constant-time pairing-code check with a per-address lockout after repeated failures."""
 
     def __init__(self, code: str, clock: Callable[[], float] = time.monotonic) -> None:
-        self._code = code
+        self.code = code
         self._clock = clock
         self._failures: dict[str, int] = {}
         self._locked_until: dict[str, float] = {}
@@ -71,26 +81,49 @@ class PairingGuard:
             return False
         return True
 
-    def check(self, address: str, candidate: str) -> bool:
-        if hmac.compare_digest(candidate.encode(), self._code.encode()):
-            self._failures.pop(address, None)
-            return True
+    def record_failure(self, address: str) -> None:
         count = self._failures.get(address, 0) + 1
         self._failures[address] = count
         if count >= MAX_FAILED_ATTEMPTS:
             self._locked_until[address] = self._clock() + LOCKOUT_SECONDS
+
+    def check(self, address: str, candidate: str) -> bool:
+        if hmac.compare_digest(candidate.encode(), self.code.encode()):
+            self._failures.pop(address, None)
+            return True
+        self.record_failure(address)
         return False
+
+
+def _parse_address(address: str | None) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    try:
+        ip = ipaddress.ip_address(address or "")
+    except ValueError:
+        return None
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        return ip.ipv4_mapped
+    return ip
 
 
 def is_local_address(address: str | None) -> bool:
     """Only loopback and private-network clients may connect."""
-    try:
-        ip = ipaddress.ip_address(address or "")
-    except ValueError:
-        return False
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
-        ip = ip.ipv4_mapped
-    return any(ip in network for network in LOCAL_NETWORKS if network.version == ip.version)
+    ip = _parse_address(address)
+    return ip is not None and any(ip in network for network in LOCAL_NETWORKS if network.version == ip.version)
+
+
+def is_loopback_address(address: str | None) -> bool:
+    ip = _parse_address(address)
+    return ip is not None and ip.is_loopback
+
+
+@dataclass(frozen=True)
+class ServerInfo:
+    """What a phone needs to know about this PC, and what the admin page shows."""
+
+    name: str = "this PC"
+    port: int = 8443
+    pin_hex: str = "00" * 32
+    ips: tuple[str, ...] = ()
 
 
 @dataclass
@@ -98,18 +131,33 @@ class _Session:
     ws: web.WebSocketResponse
     output: Output
     address: str
+    device_id: str | None
 
 
 @dataclass
-class _State:
+class ServerState:
     guard: PairingGuard
     output_factory: OutputFactory
+    registry: DeviceRegistry
+    enrollment: EnrollmentTokens
+    info: ServerInfo
     apk_path: Path = DEFAULT_APK
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     active: _Session | None = None
 
 
-STATE = web.AppKey("state", _State)
+STATE = web.AppKey("state", ServerState)
+
+
+async def revoke_device(state: ServerState, device_id: str) -> bool:
+    """Remove a paired phone and cut its connection if it is streaming right now."""
+    if not state.registry.revoke(device_id):
+        return False
+    session = state.active
+    if session is not None and session.device_id == device_id:
+        await session.ws.close(code=4403, message=b"revoked")
+    log.info("Device %s revoked", device_id)
+    return True
 
 
 async def _index(request: web.Request) -> web.StreamResponse:
@@ -136,6 +184,33 @@ async def _apk(request: web.Request) -> web.StreamResponse:
     )
 
 
+async def _enroll(request: web.Request) -> web.StreamResponse:
+    """Swap a one-time pairing token for a permanent device identity."""
+    state = request.app[STATE]
+    address = request.remote or ""
+    if not is_local_address(address):
+        raise web.HTTPForbidden(text="Local network clients only.")
+    if state.guard.locked(address):
+        raise web.HTTPTooManyRequests(text="Too many failed attempts. Try again in a minute.")
+    try:
+        body = await request.json()
+        token = body["token"]
+        public_key = base64.b64decode(body["publicKey"], validate=True)
+        if not isinstance(token, str):
+            raise TypeError("token must be a string")
+        state.registry.validate_public_key(public_key)
+        name = clean_name(body.get("name"))
+    except (ValueError, KeyError, TypeError, binascii.Error):
+        raise web.HTTPBadRequest(text="Bad pairing request.")
+    if not state.enrollment.consume(token):
+        state.guard.record_failure(address)
+        await asyncio.sleep(AUTH_FAIL_DELAY_S)
+        raise web.HTTPForbidden(text="The pairing code expired or was already used. Show a new one on the PC.")
+    device = state.registry.add(name, public_key)
+    log.info("Paired %r from %s as device %s", device.name, address, device.id)
+    return web.json_response({"deviceId": device.id, "name": state.info.name})
+
+
 async def _send_stats(session: _Session) -> None:
     queue = session.output.queue
     while not session.ws.closed:
@@ -150,13 +225,45 @@ async def _send_stats(session: _Session) -> None:
         )
 
 
+async def _reject(ws: web.WebSocketResponse, code: int, reason: str) -> None:
+    await ws.send_json({"type": "error", "reason": reason})
+    await asyncio.sleep(AUTH_FAIL_DELAY_S)
+    await ws.close(code=code, message=reason.encode())
+
+
+async def _authenticate_device(
+    state: ServerState, ws: web.WebSocketResponse, address: str, device_id: str
+) -> bool:
+    """Challenge a paired phone. On failure the socket is closed and False is returned."""
+    if state.registry.get(device_id) is None:
+        state.guard.record_failure(address)
+        await _reject(ws, 4403, "unknown device")
+        return False
+    nonce = secrets.token_hex(16)
+    await ws.send_json({"type": "challenge", "nonce": nonce})
+    try:
+        reply = await asyncio.wait_for(ws.receive_json(), HELLO_TIMEOUT_S)
+        if reply.get("type") != "auth":
+            raise ValueError("expected auth")
+        signature = base64.b64decode(reply["signature"], validate=True)
+    except (asyncio.TimeoutError, TypeError, ValueError, KeyError, binascii.Error):
+        await ws.close(code=4400, message=b"bad auth")
+        return False
+    if not state.registry.verify(device_id, nonce, signature):
+        state.guard.record_failure(address)
+        await _reject(ws, 4401, "bad signature")
+        return False
+    state.registry.touch(device_id, address)
+    return True
+
+
 async def _ws_handler(request: web.Request) -> web.StreamResponse:
     state = request.app[STATE]
     address = request.remote or ""
     if not is_local_address(address):
         raise web.HTTPForbidden(text="Local network clients only.")
     if state.guard.locked(address):
-        raise web.HTTPTooManyRequests(text="Too many wrong codes. Try again in a minute.")
+        raise web.HTTPTooManyRequests(text="Too many failed attempts. Try again in a minute.")
 
     ws = web.WebSocketResponse(heartbeat=10, max_msg_size=64 * 1024)
     await ws.prepare(request)
@@ -164,18 +271,22 @@ async def _ws_handler(request: web.Request) -> web.StreamResponse:
     try:
         hello = await asyncio.wait_for(ws.receive_json(), HELLO_TIMEOUT_S)
         sample_rate = int(hello["sampleRate"])
-        code = str(hello["code"])
         if hello.get("type") != "hello" or not MIN_SAMPLE_RATE <= sample_rate <= MAX_SAMPLE_RATE:
             raise ValueError("bad hello")
+        device_id = hello.get("device")
+        code = None if device_id is not None else str(hello["code"])
+        if device_id is not None:
+            device_id = str(device_id)
     except (asyncio.TimeoutError, TypeError, ValueError, KeyError):
         await ws.close(code=4400, message=b"bad hello")
         return ws
 
-    if not state.guard.check(address, code):
+    if device_id is not None:
+        if not await _authenticate_device(state, ws, address, device_id):
+            return ws
+    elif not state.guard.check(address, code or ""):
         log.warning("Wrong pairing code from %s", address)
-        await ws.send_json({"type": "error", "reason": "wrong code"})
-        await asyncio.sleep(AUTH_FAIL_DELAY_S)
-        await ws.close(code=4401, message=b"wrong code")
+        await _reject(ws, 4401, "wrong code")
         return ws
 
     async with state.lock:
@@ -192,10 +303,10 @@ async def _ws_handler(request: web.Request) -> web.StreamResponse:
             await ws.send_json({"type": "error", "reason": f"audio output failed: {exc}"})
             await ws.close(code=4500, message=b"audio error")
             return ws
-        session = _Session(ws, output, address)
+        session = _Session(ws, output, address, device_id)
         state.active = session
 
-    log.info("Phone connected from %s (%d Hz)", address, sample_rate)
+    log.info("Phone connected from %s (%d Hz)%s", address, sample_rate, f" as device {device_id}" if device_id else "")
     await ws.send_json({"type": "ready"})
     stats_task = asyncio.create_task(_send_stats(session))
     try:
@@ -215,18 +326,34 @@ async def _ws_handler(request: web.Request) -> web.StreamResponse:
 
 
 async def _close_active(app: web.Application) -> None:
-    session = app[STATE].active
+    state = app[STATE]
+    session = state.active
     if session is not None:
-        app[STATE].active = None
+        state.active = None
         await session.ws.close(code=1001)
         session.output.close()
 
 
-def create_app(code: str, output_factory: OutputFactory, apk_path: Path = DEFAULT_APK) -> web.Application:
-    app = web.Application()
-    app[STATE] = _State(guard=PairingGuard(code), output_factory=output_factory, apk_path=apk_path)
+def create_app(
+    code: str,
+    output_factory: OutputFactory,
+    apk_path: Path = DEFAULT_APK,
+    registry: DeviceRegistry | None = None,
+    enrollment: EnrollmentTokens | None = None,
+    info: ServerInfo | None = None,
+) -> web.Application:
+    app = web.Application(client_max_size=64 * 1024)
+    app[STATE] = ServerState(
+        guard=PairingGuard(code),
+        output_factory=output_factory,
+        registry=registry if registry is not None else DeviceRegistry(),
+        enrollment=enrollment if enrollment is not None else EnrollmentTokens(),
+        info=info if info is not None else ServerInfo(),
+        apk_path=apk_path,
+    )
     app.router.add_get("/", _index)
     app.router.add_get("/app.apk", _apk)
+    app.router.add_post("/enroll", _enroll)
     app.router.add_get("/ws", _ws_handler)
     app.on_shutdown.append(_close_active)
     return app

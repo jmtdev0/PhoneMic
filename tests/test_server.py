@@ -75,14 +75,13 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("PhoneMic", await response.text())
 
     async def test_apk_is_served_when_built_and_404_otherwise(self):
-        missing = await self.client.get("/app.apk")
-        self.assertEqual(missing.status, 404)
         with tempfile.TemporaryDirectory() as tmp:
             apk = Path(tmp) / "app.apk"
-            apk.write_bytes(b"PK\x03\x04fake")
             client = TestClient(TestServer(create_app(CODE, FakeOutput, apk_path=apk)))
             await client.start_server()
             try:
+                self.assertEqual((await client.get("/app.apk")).status, 404)
+                apk.write_bytes(b"PK\x03\x04fake")
                 response = await client.get("/app.apk")
                 self.assertEqual(response.status, 200)
                 self.assertEqual(response.headers["Content-Type"], "application/vnd.android.package-archive")
