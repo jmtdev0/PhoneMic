@@ -72,7 +72,7 @@ class MainActivity : Activity() {
 
         column.addView(text(13f, 2).apply { this.text = "PC address (shown in the PC window)" })
         hostInput = EditText(this).apply {
-            hint = "192.168.1.38:8443"
+            hint = "192.168.1.20:8443"
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
             setSingleLine()
         }
@@ -175,7 +175,7 @@ class MainActivity : Activity() {
         MicState.status = "Certificate forgotten. It will be trusted again on the next connection."
     }
 
-    /** Accepts "192.168.1.38:8443", "https://192.168.1.38:8443/" and similar pasted forms. */
+    /** Accepts "192.168.1.20:8443", "https://192.168.1.20:8443/" and similar pasted forms. */
     private fun normalizeHost(raw: String): String =
         raw.trim().removePrefix("https://").removePrefix("http://").trimEnd('/')
 

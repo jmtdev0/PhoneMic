@@ -13,3 +13,4 @@
 * The server now prints the certificate SHA-256 and serves the APK at `/app.apk`, so the phone can install it over
   Wi-Fi without a USB cable.
 * Published the project as a public GitHub repository (jmtdev0/PhoneMic) under the MIT license.
+* Release 0.1.1: the Android app's example address is now generic (192.168.1.20:8443); 0.1.0 was withdrawn.
