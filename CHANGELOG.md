@@ -12,3 +12,4 @@
   reconnection with backoff, Wi-Fi and wake locks. Builds to a 1.3 MB debug APK.
 * The server now prints the certificate SHA-256 and serves the APK at `/app.apk`, so the phone can install it over
   Wi-Fi without a USB cable.
+* Published the project as a public GitHub repository (jmtdev0/PhoneMic) under the MIT license.

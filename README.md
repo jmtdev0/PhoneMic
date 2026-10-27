@@ -53,6 +53,10 @@ The web page needs the phone's screen on. The native app in `android/` runs as a
 - The code changes on every start, and nothing leaves the local network.
 - The certificate is generated locally in `certs/` (ignored by git) and renewed when the PC's addresses change.
 
+## License
+
+MIT, see [LICENSE](LICENSE). VB-CABLE is a separate product by VB-Audio and is not included in this repository.
+
 ## Checks
 
 ```powershell
