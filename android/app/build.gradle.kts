@@ -12,8 +12,8 @@ android {
         minSdk = 26
         // 34 keeps the classic window layout; the app is sideloaded, so there is no store requirement.
         targetSdk = 34
-        versionCode = 2
-        versionName = "0.1.1"
+        versionCode = 3
+        versionName = "0.2.0"
     }
 
     buildTypes {
@@ -34,4 +34,5 @@ android {
 
 dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    testImplementation("junit:junit:4.13.2")
 }

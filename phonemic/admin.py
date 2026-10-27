@@ -85,6 +85,8 @@ def render_page(state: ServerState, token: str) -> str:
          3. Confirm the pairing in the app.</p>
       <p class="muted">The code works once and expires in <b id="left">{ttl // 60}:{ttl % 60:02d}</b>.
          Reloading this page makes a new one and cancels this one.</p>
+      <details><summary class="muted">Can't scan the code?</summary>
+        <p class="muted">Send this link to the phone and tap it:<br><code>{html.escape(link)}</code></p></details>
     </div>
   </div>
 </section>

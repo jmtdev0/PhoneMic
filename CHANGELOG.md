@@ -14,3 +14,12 @@
   Wi-Fi without a USB cable.
 * Published the project as a public GitHub repository (jmtdev0/PhoneMic) under the MIT license.
 * Release 0.1.1: the Android app's example address is now generic (192.168.1.20:8443); 0.1.0 was withdrawn.
+* Version 0.2.0, pairing by QR code that never expires:
+  * Single-use pairing tokens (5 minutes) shown as a QR code on a loopback-only pairing page, with the link also as text.
+  * Each phone gets a permanent identity: a P-256 key created in the Android Keystore, proven by signing a fresh
+    challenge on every connection. The paired phones are listed on the page and can be revoked, which cuts them off at once.
+  * Stable server key: the certificate is re-issued when the addresses change but the key and its pin stay, so the app
+    pins the public key instead of trusting the first certificate it sees.
+  * The app finds the PC again after an address change by sweeping the Wi-Fi network for the pinned key.
+  * Tests: 48 for the PC side (pairing flow over real sockets included) and 10 for the app; checked end to end on an
+    Android 16 emulator against the real server (pair, stream, rediscover after a wrong address, revoke).

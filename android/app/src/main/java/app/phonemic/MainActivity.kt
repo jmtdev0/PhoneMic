@@ -2,35 +2,40 @@ package app.phonemic
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
-import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.text.InputFilter
-import android.text.InputType
-import android.view.Gravity
+import android.provider.Settings
+import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.Button
-import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
+import java.net.ConnectException
+import java.net.SocketTimeoutException
+import javax.net.ssl.SSLException
 
-/** One screen: PC address, pairing code and a Start/Stop button. */
+/**
+ * Pairing happens once: scan the QR code on the PC with the camera app, which opens this screen with a pairing
+ * link. After that the phone only needs Start.
+ */
 class MainActivity : Activity() {
-    private lateinit var prefs: SharedPreferences
-    private lateinit var hostInput: EditText
-    private lateinit var codeInput: EditText
+    private lateinit var credentials: Credentials
+    private lateinit var unpairedGroup: LinearLayout
+    private lateinit var pairedGroup: LinearLayout
+    private lateinit var pcView: TextView
     private lateinit var toggle: Button
     private lateinit var statusView: TextView
-    private lateinit var certView: TextView
     private lateinit var statsView: TextView
+    private lateinit var certView: TextView
     private lateinit var meter: ProgressBar
     private val ui = Handler(Looper.getMainLooper())
     private val refresh = object : Runnable {
@@ -42,9 +47,15 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        credentials = Credentials(getSharedPreferences(Credentials.PREFS, Context.MODE_PRIVATE))
         setContentView(buildLayout())
-        hostInput.setText(prefs.getString(KEY_HOST, ""))
+        handleIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIntent(intent)
     }
 
     override fun onResume() {
@@ -62,90 +73,137 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(24), dp(48), dp(24), dp(24))
         }
-        fun text(size: Float, bottom: Int = 8) = TextView(this).apply {
+        fun label(size: Float, bottom: Int = 8) = TextView(this).apply {
             textSize = size
             setPadding(0, 0, 0, dp(bottom))
         }
-
-        column.addView(text(26f, 4).apply { this.text = "PhoneMic" })
-        column.addView(text(14f, 20).apply { this.text = "Use this phone as the microphone of your PC." })
-
-        column.addView(text(13f, 2).apply { this.text = "PC address (shown in the PC window)" })
-        hostInput = EditText(this).apply {
-            hint = "192.168.1.20:8443"
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
-            setSingleLine()
-        }
-        column.addView(hostInput, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-
-        column.addView(text(13f, 2).apply { this.text = "Pairing code"; setPadding(0, dp(12), 0, dp(2)) })
-        codeInput = EditText(this).apply {
-            hint = "000000"
-            inputType = InputType.TYPE_CLASS_NUMBER
-            filters = arrayOf(InputFilter.LengthFilter(CODE_LENGTH))
-            gravity = Gravity.CENTER
-            textSize = 24f
-        }
-        column.addView(codeInput, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-
-        toggle = Button(this).apply { setOnClickListener { onToggle() } }
-        column.addView(toggle, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(16) })
-
-        statusView = text(16f, 4).apply { setPadding(0, dp(16), 0, dp(4)) }
+        column.addView(label(26f, 4).apply { text = "PhoneMic" })
+        column.addView(label(14f, 12).apply { text = "Use this phone as the microphone of your PC." })
+        statusView = label(16f, 16)
         column.addView(statusView)
+
+        unpairedGroup = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        unpairedGroup.addView(label(16f, 12).apply { text = "This phone is not paired yet." })
+        unpairedGroup.addView(label(14f, 12).apply {
+            text = "1. On the PC, run PhoneMic and open http://127.0.0.1:8444 in the browser.\n" +
+                "2. Scan the QR code on that page with this phone's camera app.\n" +
+                "3. Tap the link it offers (it opens PhoneMic) and confirm the pairing."
+        })
+        column.addView(unpairedGroup)
+
+        pairedGroup = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        pcView = label(16f, 12)
+        pairedGroup.addView(pcView)
+        toggle = Button(this).apply { setOnClickListener { onToggle() } }
+        pairedGroup.addView(toggle, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         meter = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { max = 100 }
-        column.addView(meter, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-        statsView = text(12f, 12).apply { setPadding(0, dp(6), 0, dp(12)) }
-        column.addView(statsView)
-
-        certView = text(11f, 8)
-        column.addView(certView)
-        column.addView(Button(this).apply {
-            text = "Forget certificate"
-            setOnClickListener { forgetCertificate() }
+        pairedGroup.addView(meter, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(16) })
+        statsView = label(12f, 8).apply { setPadding(0, dp(6), 0, dp(8)) }
+        pairedGroup.addView(statsView)
+        certView = label(11f, 8)
+        pairedGroup.addView(certView)
+        pairedGroup.addView(Button(this).apply {
+            text = "Unpair this phone"
+            setOnClickListener { confirmUnpair() }
         })
-        column.addView(text(12f, 0).apply {
+        pairedGroup.addView(label(12f, 0).apply {
             setPadding(0, dp(16), 0, 0)
-            this.text = "Tip: for long sessions set this app's battery usage to Unrestricted in Android settings."
+            text = "Tip: for long sessions set this app's battery usage to Unrestricted in Android settings."
         })
-
+        column.addView(pairedGroup)
         return ScrollView(this).apply { addView(column) }
     }
 
     private fun render() {
-        val running = MicState.running
-        toggle.text = if (running) "Stop" else "Start"
-        hostInput.isEnabled = !running
-        codeInput.isEnabled = !running
+        val paired = credentials.isPaired
+        unpairedGroup.visibility = if (paired) View.GONE else View.VISIBLE
+        pairedGroup.visibility = if (paired) View.VISIBLE else View.GONE
         statusView.text = MicState.status
+        if (!paired) return
+        toggle.text = if (MicState.running) "Stop" else "Start"
+        pcView.text = "Paired with ${credentials.pcName}\nLast address: ${credentials.host}"
         statsView.text = MicState.stats
         meter.progress = (MicState.level * 100).toInt().coerceIn(0, 100)
         MicState.level *= 0.85f
-        certView.text = MicState.fingerprint?.let { "Server certificate SHA-256 (compare with the PC window):\n$it" }
-            ?: "Server certificate: not seen yet"
+        certView.text = "PC key (compare with the PC window):\n${formatPin(credentials.pinHex.orEmpty())}"
     }
+
+    // --- pairing -------------------------------------------------------------------------------------------
+
+    private fun handleIntent(intent: Intent?) {
+        val data = intent?.data ?: return
+        intent.data = null // consumed: a rotation must not ask again
+        val link = PairingLink.parse(data.toString())
+        if (link == null) {
+            MicState.status = "That pairing link is not valid."
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Pair with ${link.pcName}?")
+            .setMessage(
+                "Address: ${link.host}\nPC key: ${formatPin(link.pinHex).take(KEY_PREVIEW_CHARS)}…\n\n" +
+                    "Only continue if this is the PC you are looking at.",
+            )
+            .setPositiveButton("Pair") { _, _ -> pair(link) }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun pair(link: PairingLink) {
+        if (MicState.running) stopService(Intent(this, MicService::class.java))
+        MicState.status = "Pairing…"
+        Thread({
+            try {
+                val result = Enroller.enroll(link, deviceName(), DeviceKey.publicKeyDer())
+                credentials.save(result.deviceId, link.pinHex, link.host, result.pcName)
+                ui.post { MicState.status = "Paired with ${result.pcName}. Press Start." }
+            } catch (error: Exception) {
+                ui.post { MicState.status = "Pairing failed: ${explain(error, link)}" }
+            }
+        }, "phonemic-pair").start()
+    }
+
+    private fun explain(error: Exception, link: PairingLink): String = when {
+        error is Enroller.PairingRefused -> error.message.orEmpty()
+        generateSequence<Throwable>(error) { it.cause }.any { it.message == SpkiPinTrustManager.MISMATCH_MESSAGE } ->
+            "The PC's key does not match the QR code. Show a new QR code on the PC."
+        error is ConnectException || error is SocketTimeoutException ->
+            "Could not reach ${link.host}. Are the phone and the PC on the same Wi-Fi, and is PhoneMic running?"
+        error is SSLException -> "Secure connection failed: ${error.message}"
+        else -> error.message ?: error.javaClass.simpleName
+    }
+
+    private fun deviceName(): String =
+        Settings.Global.getString(contentResolver, "device_name")?.takeIf { it.isNotBlank() } ?: Build.MODEL
+
+    private fun confirmUnpair() {
+        AlertDialog.Builder(this)
+            .setTitle("Unpair this phone?")
+            .setMessage("You will have to scan a new QR code. You can also revoke this phone on the PC's pairing page.")
+            .setPositiveButton("Unpair") { _, _ ->
+                if (MicState.running) stopService(Intent(this, MicService::class.java))
+                credentials.clear()
+                DeviceKey.delete()
+                MicState.fingerprint = null
+                MicState.stats = ""
+                MicState.status = "Unpaired."
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    // --- streaming -----------------------------------------------------------------------------------------
 
     private fun onToggle() {
         if (MicState.running) {
             stopService(Intent(this, MicService::class.java))
             return
         }
-        val host = normalizeHost(hostInput.text.toString())
-        val code = codeInput.text.toString().trim()
-        if (host.isEmpty()) {
-            MicState.status = "Enter the PC address shown in the PC window."
-            return
-        }
-        if (code.length != CODE_LENGTH) {
-            MicState.status = "Enter the 6-digit pairing code."
-            return
-        }
-        prefs.edit().putString(KEY_HOST, host).apply()
         val needed = buildList {
             add(Manifest.permission.RECORD_AUDIO)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) add(Manifest.permission.POST_NOTIFICATIONS)
         }.filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
-        if (needed.isEmpty()) startStreaming(host, code) else requestPermissions(needed.toTypedArray(), REQUEST_PERMISSIONS)
+        if (needed.isEmpty()) startStreaming() else requestPermissions(needed.toTypedArray(), REQUEST_PERMISSIONS)
     }
 
     @Deprecated("Deprecated in Java")
@@ -153,38 +211,21 @@ class MainActivity : Activity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode != REQUEST_PERMISSIONS) return
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-            startStreaming(normalizeHost(hostInput.text.toString()), codeInput.text.toString().trim())
+            startStreaming()
         } else {
             MicState.status = "The microphone permission is required."
         }
     }
 
-    private fun startStreaming(host: String, code: String) {
+    private fun startStreaming() {
         MicState.status = "Connecting…"
-        startForegroundService(
-            Intent(this, MicService::class.java)
-                .putExtra(MicService.EXTRA_HOST, host)
-                .putExtra(MicService.EXTRA_CODE, code),
-        )
+        startForegroundService(Intent(this, MicService::class.java))
     }
-
-    private fun forgetCertificate() {
-        val host = normalizeHost(hostInput.text.toString())
-        prefs.edit().remove(PinningTrustManager.pinKey(host)).apply()
-        MicState.fingerprint = null
-        MicState.status = "Certificate forgotten. It will be trusted again on the next connection."
-    }
-
-    /** Accepts "192.168.1.20:8443", "https://192.168.1.20:8443/" and similar pasted forms. */
-    private fun normalizeHost(raw: String): String =
-        raw.trim().removePrefix("https://").removePrefix("http://").trimEnd('/')
 
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
 
     companion object {
-        const val PREFS = "phonemic"
-        private const val KEY_HOST = "host"
-        private const val CODE_LENGTH = 6
         private const val REQUEST_PERMISSIONS = 1
+        private const val KEY_PREVIEW_CHARS = 23 // the first eight bytes of the pin
     }
 }

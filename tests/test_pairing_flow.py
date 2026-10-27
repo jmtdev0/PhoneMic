@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import html
 import unittest
 from unittest import mock
 
@@ -188,6 +189,11 @@ class AdminPageTests(unittest.IsolatedAsyncioTestCase):
         await self.client.get("/")
         self.assertNotEqual(token, self.state.enrollment._token)
         self.assertFalse(self.state.enrollment.consume(token))
+
+    async def test_the_page_also_shows_the_link_as_text_for_when_scanning_fails(self):
+        page = await (await self.client.get("/")).text()
+        token = self.state.enrollment._token
+        self.assertIn(html.escape(pairing_link(token, self.state.info)), page)
 
     async def test_the_qr_link_carries_the_token_the_key_pin_and_the_address(self):
         token = self.state.enrollment.create()

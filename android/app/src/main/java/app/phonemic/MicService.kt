@@ -18,6 +18,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.util.Base64
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -26,20 +27,20 @@ import okhttp3.WebSocketListener
 import okio.ByteString.Companion.toByteString
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
-import javax.net.ssl.SSLContext
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
 /**
- * Foreground service that captures the microphone and streams it to the PC.
+ * Foreground service that captures the microphone and streams it to the paired PC.
  *
- * It speaks the same protocol as the web page: a "hello" with the pairing code, then 20 ms chunks of
- * little-endian int16 mono PCM. Being a foreground service of type "microphone", it keeps capturing with
- * the screen off.
+ * It authenticates with this phone's Keystore key (the PC sends a challenge, the phone signs it), then sends 20 ms
+ * chunks of little-endian int16 mono PCM. If the PC is not where it used to be it looks for it on the Wi-Fi
+ * network. Being a foreground service of type "microphone", it keeps capturing with the screen off.
  */
 class MicService : Service() {
     private val main = Handler(Looper.getMainLooper())
+    private lateinit var credentials: Credentials
     private var client: OkHttpClient? = null
     @Volatile private var socket: WebSocket? = null
     @Volatile private var ready = false
@@ -48,8 +49,10 @@ class MicService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
     private var retryDelayMs = INITIAL_RETRY_MS
-    private var host = ""
-    private var code = ""
+    private var failures = 0
+    private var currentHost = ""
+    private var deviceId = ""
+    private var pinHex = ""
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -58,20 +61,30 @@ class MicService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        host = intent?.getStringExtra(EXTRA_HOST).orEmpty()
-        code = intent?.getStringExtra(EXTRA_CODE).orEmpty()
-        if (host.isEmpty() || code.isEmpty() || running) {
+        credentials = Credentials(getSharedPreferences(Credentials.PREFS, Context.MODE_PRIVATE))
+        if (running) return START_NOT_STICKY
+        if (!credentials.isPaired) {
+            // The service must not stay in the foreground without a notification.
+            startInForeground()
+            fatal("This phone is not paired. Scan the QR code on the PC.")
             return START_NOT_STICKY
         }
+        deviceId = credentials.deviceId!!
+        pinHex = credentials.pinHex!!
+        currentHost = credentials.host!!
         startInForeground()
         acquireLocks()
-        client = buildClient()
+        client = PinnedTls.clientBuilder(SpkiPinTrustManager(pinHex) { MicState.fingerprint = it })
+            .pingInterval(10, TimeUnit.SECONDS)
+            .readTimeout(0, TimeUnit.MILLISECONDS)
+            .build()
         running = true
+        failures = 0
         MicState.running = true
         MicState.stats = ""
         startCapture()
         connect()
-        // The pairing code is not stored, so a restart by the system could not reconnect anyway.
+        // The phone can always reconnect by itself, but a restart by the system has no UI to ask for permissions.
         return START_NOT_STICKY
     }
 
@@ -92,43 +105,35 @@ class MicService : Service() {
         super.onDestroy()
     }
 
-    private fun buildClient(): OkHttpClient {
-        val prefs = getSharedPreferences(MainActivity.PREFS, Context.MODE_PRIVATE)
-        val trust = PinningTrustManager(prefs, host) { MicState.fingerprint = it }
-        val tls = SSLContext.getInstance("TLS").apply { init(null, arrayOf(trust), null) }
-        return OkHttpClient.Builder()
-            .sslSocketFactory(tls.socketFactory, trust)
-            // The pinned fingerprint is the authentication; the certificate's addresses may be out of date.
-            .hostnameVerifier { _, _ -> true }
-            .pingInterval(10, TimeUnit.SECONDS)
-            .readTimeout(0, TimeUnit.MILLISECONDS)
-            .build()
-    }
-
     private fun connect() {
         if (!running) return
         ready = false
         MicState.status = "Connecting…"
-        val request = Request.Builder().url("https://$host/ws").build()
+        val request = Request.Builder().url("https://$currentHost/ws").build()
         socket = client!!.newWebSocket(request, listener)
     }
 
     private val listener = object : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
-            val hello = JSONObject()
-                .put("type", "hello")
-                .put("code", code)
-                .put("sampleRate", SAMPLE_RATE)
+            val hello = JSONObject().put("type", "hello").put("device", deviceId).put("sampleRate", SAMPLE_RATE)
             webSocket.send(hello.toString())
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
             val message = JSONObject(text)
             when (message.optString("type")) {
+                "challenge" -> {
+                    val signature = DeviceKey.sign(message.getString("nonce"))
+                    val auth = JSONObject()
+                        .put("type", "auth")
+                        .put("signature", Base64.encodeToString(signature, Base64.NO_WRAP))
+                    webSocket.send(auth.toString())
+                }
                 "ready" -> {
                     retryDelayMs = INITIAL_RETRY_MS
+                    failures = 0
                     ready = true
-                    MicState.status = "Streaming to the PC"
+                    MicState.status = "Streaming to ${credentials.pcName}"
                 }
                 "error" -> MicState.status = "PC says: ${message.optString("reason")}"
                 "stats" -> MicState.stats =
@@ -143,18 +148,44 @@ class MicService : Service() {
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
             ready = false
-            FATAL_CLOSE_REASONS[code]?.let { fatal(it) } ?: scheduleReconnect()
+            when (code) {
+                4403 -> {
+                    credentials.clear()
+                    DeviceKey.delete()
+                    fatal("The PC no longer recognises this phone (it was revoked). Scan the QR code again to pair.")
+                }
+                else -> FATAL_CLOSE_REASONS[code]?.let { fatal(it) } ?: scheduleReconnect()
+            }
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             ready = false
-            val changed = generateSequence(t) { it.cause }.any { it.message?.contains("certificate changed") == true }
-            if (changed) {
-                fatal("The PC's certificate changed. Check the PC window, then tap \"Forget certificate\".")
-            } else {
-                scheduleReconnect()
-            }
+            failures++
+            // The first failure, and every third after it, may mean the PC changed address: look for it.
+            if (failures == 1 || failures % 3 == 0) lookForPc() else scheduleReconnect()
         }
+    }
+
+    private fun lookForPc() {
+        if (!running) return
+        MicState.status = "Looking for your PC…"
+        val port = currentHost.substringAfterLast(':').toIntOrNull() ?: DEFAULT_PORT
+        Thread({
+            val found = Discovery.find(applicationContext, port, pinHex) { !running }
+            main.post {
+                if (!running) return@post
+                if (found != null) {
+                    if (found != currentHost) {
+                        currentHost = found
+                        credentials.host = found
+                    }
+                    connect()
+                } else {
+                    MicState.status = "Could not find your PC on this Wi-Fi network. Retrying…"
+                    scheduleReconnect()
+                }
+            }
+        }, "phonemic-discovery").start()
     }
 
     private fun scheduleReconnect() {
@@ -259,12 +290,11 @@ class MicService : Service() {
     }
 
     companion object {
-        const val EXTRA_HOST = "host"
-        const val EXTRA_CODE = "code"
         const val ACTION_STOP = "app.phonemic.STOP"
 
         private const val SAMPLE_RATE = 48000
         private const val CHUNK_SAMPLES = 960            // 20 ms
+        private const val DEFAULT_PORT = 8443
         private const val MAX_QUEUED_BYTES = 128 * 1024L
         private const val INITIAL_RETRY_MS = 1000L
         private const val MAX_RETRY_MS = 5000L
@@ -274,7 +304,7 @@ class MicService : Service() {
 
         private val FATAL_CLOSE_REASONS = mapOf(
             4400 to "The PC did not understand the connection.",
-            4401 to "Wrong pairing code. Enter the new one shown on the PC.",
+            4401 to "The PC rejected this phone's signature. Scan the QR code again to pair.",
             4409 to "Another phone took over the connection.",
             4500 to "The PC could not open its audio output.",
         )
