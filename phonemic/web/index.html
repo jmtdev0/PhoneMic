@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<title>PhoneMic</title>
+<style>
+  :root {
+    --bg: #14161a; --card: #1f2329; --text: #e8eaed; --muted: #9aa0a6;
+    --accent: #4f9dff; --ok: #3ecf8e; --warn: #f5b942; --bad: #ff6b6b;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg: #f4f5f7; --card: #ffffff; --text: #1c1e21; --muted: #5f6368; --accent: #1a73e8; --ok: #188a5a; --warn: #b06a00; --bad: #c5221f; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 16px;
+    background: var(--bg); color: var(--text); font: 16px/1.45 system-ui, sans-serif;
+  }
+  main { width: 100%; max-width: 420px; background: var(--card); border-radius: 16px; padding: 24px; }
+  h1 { margin: 0 0 4px; font-size: 1.4rem; }
+  p { margin: 0 0 16px; color: var(--muted); }
+  label { display: block; margin-bottom: 6px; font-size: .9rem; color: var(--muted); }
+  input {
+    width: 100%; padding: 12px; font-size: 1.6rem; letter-spacing: .3em; text-align: center;
+    border-radius: 10px; border: 1px solid var(--muted); background: transparent; color: var(--text);
+  }
+  button {
+    width: 100%; margin-top: 16px; padding: 14px; font-size: 1.1rem; font-weight: 600;
+    border: 0; border-radius: 10px; background: var(--accent); color: #fff;
+  }
+  button.stop { background: var(--bad); }
+  #status { margin-top: 16px; min-height: 1.5em; }
+  #status.ok { color: var(--ok); } #status.warn { color: var(--warn); } #status.bad { color: var(--bad); }
+  #meter { height: 10px; margin-top: 12px; border-radius: 5px; background: rgba(128, 128, 128, .25); overflow: hidden; }
+  #meter > div { height: 100%; width: 0; background: var(--ok); transition: width 60ms linear; }
+  #stats { margin-top: 10px; font-size: .85rem; color: var(--muted); min-height: 1.2em; }
+  .hint { margin: 18px 0 0; font-size: .85rem; }
+  .hint a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>PhoneMic</h1>
+  <p>Use this phone as the microphone of your PC. Keep this page open and the screen on.</p>
+  <label for="code">Pairing code shown on the PC</label>
+  <input id="code" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="off" placeholder="000000">
+  <button id="toggle" type="button">Start</button>
+  <div id="status" role="status"></div>
+  <div id="meter" aria-hidden="true"><div></div></div>
+  <div id="stats"></div>
+  <p class="hint"><a href="/app.apk">Get the Android app</a>: it keeps sending with the screen off.</p>
+</main>
+
+<script>
+// AudioWorklet that turns the microphone into 20 ms int16 chunks (960 samples at 48 kHz).
+const WORKLET_SOURCE = `
+class Capture extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.chunk = new Int16Array(960);
+    this.filled = 0;
+    this.peak = 0;
+  }
+  process(inputs) {
+    const channel = inputs[0] && inputs[0][0];
+    if (!channel) return true;
+    for (let i = 0; i < channel.length; i++) {
+      const sample = Math.max(-1, Math.min(1, channel[i]));
+      this.peak = Math.max(this.peak, Math.abs(sample));
+      this.chunk[this.filled++] = sample < 0 ? sample * 32768 : sample * 32767;
+      if (this.filled === this.chunk.length) {
+        const pcm = this.chunk.slice().buffer;
+        this.port.postMessage({ pcm, peak: this.peak }, [pcm]);
+        this.filled = 0;
+        this.peak = 0;
+      }
+    }
+    return true;
+  }
+}
+registerProcessor('capture', Capture);`;
+
+const MAX_QUEUED_BYTES = 128 * 1024;   // drop audio instead of building up latency
+const MAX_RETRY_DELAY_MS = 5000;
+const FATAL_CLOSE_CODES = new Set([4400, 4401, 4409, 4500]);
+
+const el = {
+  code: document.getElementById('code'),
+  toggle: document.getElementById('toggle'),
+  status: document.getElementById('status'),
+  meter: document.querySelector('#meter > div'),
+  stats: document.getElementById('stats'),
+};
+
+let audioContext = null;
+let micStream = null;
+let socket = null;
+let wakeLock = null;
+let running = false;
+let retryDelay = 1000;
+let retryTimer = null;
+let level = 0;
+
+function setStatus(text, kind = '') {
+  el.status.textContent = text;
+  el.status.className = kind;
+}
+
+function drawMeter() {
+  level *= 0.92;
+  el.meter.style.width = Math.min(100, Math.round(level * 100)) + '%';
+  requestAnimationFrame(drawMeter);
+}
+
+async function requestWakeLock() {
+  try {
+    if ('wakeLock' in navigator && running) wakeLock = await navigator.wakeLock.request('screen');
+  } catch (_) { /* optional: the page works without it, the screen may just turn off */ }
+}
+
+function connect(code) {
+  socket = new WebSocket('wss://' + location.host + '/ws');
+  socket.binaryType = 'arraybuffer';
+  socket.onopen = () => socket.send(JSON.stringify({ type: 'hello', code, sampleRate: audioContext.sampleRate }));
+  socket.onmessage = (event) => {
+    if (typeof event.data !== 'string') return;
+    const message = JSON.parse(event.data);
+    if (message.type === 'ready') {
+      retryDelay = 1000;
+      setStatus('Streaming to the PC', 'ok');
+    } else if (message.type === 'error') {
+      setStatus('PC says: ' + message.reason, 'bad');
+    } else if (message.type === 'stats') {
+      el.stats.textContent = `Buffer ${message.bufferedMs} ms · underruns ${message.underruns} · dropped ${message.droppedMs} ms`;
+    }
+  };
+  socket.onclose = (event) => {
+    if (!running) return;
+    if (FATAL_CLOSE_CODES.has(event.code)) {
+      const reasons = {
+        4400: 'The PC did not understand the connection.',
+        4401: 'Wrong pairing code.',
+        4409: 'Another phone took over the connection.',
+        4500: 'The PC could not open its audio output.',
+      };
+      stop(reasons[event.code], 'bad');
+      return;
+    }
+    setStatus('Connection lost. Retrying…', 'warn');
+    retryTimer = setTimeout(() => connect(code), retryDelay);
+    retryDelay = Math.min(retryDelay * 2, MAX_RETRY_DELAY_MS);
+  };
+}
+
+function onChunk(event) {
+  level = Math.max(level, event.data.peak);
+  if (socket && socket.readyState === WebSocket.OPEN && socket.bufferedAmount < MAX_QUEUED_BYTES) {
+    socket.send(event.data.pcm);
+  }
+}
+
+async function start() {
+  const code = el.code.value.trim();
+  if (!/^\d{6}$/.test(code)) {
+    setStatus('Enter the 6-digit code shown on the PC.', 'warn');
+    return;
+  }
+  if (!navigator.mediaDevices || !window.isSecureContext) {
+    setStatus('The browser blocks the microphone on this page. Open the https:// address and accept the certificate warning.', 'bad');
+    return;
+  }
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: false, noiseSuppression: true, autoGainControl: true },
+    });
+  } catch (error) {
+    setStatus('Microphone permission denied: ' + error.name, 'bad');
+    return;
+  }
+  audioContext = new AudioContext({ latencyHint: 'interactive' });
+  await audioContext.resume();
+  const moduleUrl = URL.createObjectURL(new Blob([WORKLET_SOURCE], { type: 'text/javascript' }));
+  await audioContext.audioWorklet.addModule(moduleUrl);
+  const source = audioContext.createMediaStreamSource(micStream);
+  const capture = new AudioWorkletNode(audioContext, 'capture', { numberOfOutputs: 1, outputChannelCount: [1] });
+  const silence = audioContext.createGain();   // keeps the worklet running without playing anything
+  silence.gain.value = 0;
+  source.connect(capture);
+  capture.connect(silence);
+  silence.connect(audioContext.destination);
+  capture.port.onmessage = onChunk;
+
+  running = true;
+  el.toggle.textContent = 'Stop';
+  el.toggle.classList.add('stop');
+  el.code.disabled = true;
+  setStatus('Connecting…');
+  connect(code);
+  requestWakeLock();
+}
+
+function stop(message = 'Stopped.', kind = '') {
+  running = false;
+  clearTimeout(retryTimer);
+  if (socket) { socket.onclose = null; socket.close(); socket = null; }
+  if (micStream) { micStream.getTracks().forEach((track) => track.stop()); micStream = null; }
+  if (audioContext) { audioContext.close(); audioContext = null; }
+  if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
+  el.toggle.textContent = 'Start';
+  el.toggle.classList.remove('stop');
+  el.code.disabled = false;
+  el.stats.textContent = '';
+  setStatus(message, kind);
+}
+
+el.toggle.addEventListener('click', () => (running ? stop() : start()));
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && running) {
+    requestWakeLock();
+    if (audioContext && audioContext.state === 'suspended') audioContext.resume();
+  }
+});
+drawMeter();
+</script>
+</body>
+</html>
