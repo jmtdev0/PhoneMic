@@ -1,6 +1,8 @@
 # Changelog
 
 ### 29/10/2026
+* Replaced the README screenshots with new ones that use made-up data (PC `MY-PC` at 10.73.41.20) and show the
+  Dictate and Send permissions and buttons. The tests no longer contain real-looking addresses, names or phone models.
 * Version 0.3.0: remote dictation. The app has **Dictate** and **Send** buttons that press Claude Desktop's microphone
   and send buttons on the PC through Windows UI Automation. Each is a separate permission, off by default, set per
   paired phone on the pairing page and applied live. Send only works after a dictation from that phone; presses are
@@ -24,7 +26,7 @@
 * The server now prints the certificate SHA-256 and serves the APK at `/app.apk`, so the phone can install it over
   Wi-Fi without a USB cable.
 * Published the project as a public GitHub repository (jmtdev0/PhoneMic) under the MIT license.
-* Release 0.1.1: the Android app's example address is now generic (192.168.1.20:8443); 0.1.0 was withdrawn.
+* Release 0.1.1: the Android app's example address is now a made-up one; 0.1.0 was withdrawn.
 * Version 0.2.0, pairing by QR code that never expires:
   * Single-use pairing tokens (5 minutes) shown as a QR code on a loopback-only pairing page, with the link also as text.
   * Each phone gets a permanent identity: a P-256 key created in the Android Keystore, proven by signing a fresh

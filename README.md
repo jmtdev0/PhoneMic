@@ -17,26 +17,28 @@ Two ways to use it:
 ## How it looks
 
 **1. Pair once.** The PC shows a QR code on a page that only your PC can open (<http://127.0.0.1:8444>). The same page
-lists the phones already paired, with a button to revoke each one.
+lists the phones already paired, with a button to revoke each one and the two optional permissions (**Dictate** and
+**Send**, see [Remote dictation](#remote-dictation-claude-desktop)).
 
 <p align="center">
   <img src="docs/images/pairing-page.png" width="640"
-       alt="PhoneMic pairing page on the PC: a QR code, the list of paired phones with a Revoke button, and the PC's details">
+       alt="PhoneMic pairing page on the PC: a QR code, the list of paired phones with Dictate and Send checkboxes and a Revoke button, and the PC's details">
 </p>
 
 **2. Confirm on the phone, then stream.** Scanning the code with the phone's camera app opens PhoneMic, which asks you
 to confirm the pairing (first screenshot). From then on just press **Start** (second screenshot): there is no code to
-type, and the app finds the PC again if its address changes.
+type, and the app finds the PC again if its address changes. If the PC allows it for this phone, the **Dictate** and
+**Send** buttons appear under Start.
 
 <p align="center">
   <img src="docs/images/app-confirm.png" width="300"
        alt="Android app asking 'Pair with MY-PC?' with the PC's address and the start of its key">
   &nbsp;&nbsp;
   <img src="docs/images/app-streaming.png" width="300"
-       alt="Android app paired with MY-PC and streaming, showing the buffer statistics and the PC's key">
+       alt="Android app paired with MY-PC and streaming, showing the Stop dictating and Send buttons, the buffer statistics and the PC's key">
 </p>
 
-<sub>The screenshots use sample data: a PC called MY-PC at 192.168.1.20 and a phone called Pixel 6.</sub>
+<sub>The screenshots use sample data: a PC called MY-PC at 10.73.41.20 and a phone called Pixel 6. The dictation shown is simulated.</sub>
 
 ## Requirements
 
