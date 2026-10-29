@@ -14,6 +14,30 @@ Two ways to use it:
   off and finds the PC again if its address changes.
 - **Web page**: nothing to install; open the PC's address in Chrome and type a 6-digit code. The screen must stay on.
 
+## How it looks
+
+**1. Pair once.** The PC shows a QR code on a page that only your PC can open (<http://127.0.0.1:8444>). The same page
+lists the phones already paired, with a button to revoke each one.
+
+<p align="center">
+  <img src="docs/images/pairing-page.png" width="640"
+       alt="PhoneMic pairing page on the PC: a QR code, the list of paired phones with a Revoke button, and the PC's details">
+</p>
+
+**2. Confirm on the phone, then stream.** Scanning the code with the phone's camera app opens PhoneMic, which asks you
+to confirm the pairing (left). From then on just press **Start** (right): there is no code to type, and the app finds
+the PC again if its address changes.
+
+<p align="center">
+  <img src="docs/images/app-confirm.png" width="300"
+       alt="Android app asking 'Pair with MY-PC?' with the PC's address and the start of its key">
+  &nbsp;&nbsp;
+  <img src="docs/images/app-streaming.png" width="300"
+       alt="Android app paired with MY-PC and streaming, showing the buffer statistics and the PC's key">
+</p>
+
+<sub>The screenshots use sample data: a PC called MY-PC at 192.168.1.20 and a phone called Pixel 6.</sub>
+
 ## Requirements
 
 - Windows 10/11 and Python 3.13.

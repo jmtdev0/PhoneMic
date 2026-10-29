@@ -1,6 +1,8 @@
 # Changelog
 
 ### 29/10/2026
+* Added three screenshots to the README (the pairing page, the pairing confirmation and the app streaming), taken with
+  sample data from a throwaway demo server and an Android emulator so that no personal information appears in them.
 * Fixed the QR code on the pairing page being cropped on its right side (and therefore not scannable): the SVG had a
   fixed size and no viewBox, so the page CSS cropped it instead of scaling it. A test now guards against it.
 
