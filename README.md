@@ -25,8 +25,8 @@ lists the phones already paired, with a button to revoke each one.
 </p>
 
 **2. Confirm on the phone, then stream.** Scanning the code with the phone's camera app opens PhoneMic, which asks you
-to confirm the pairing (left). From then on just press **Start** (right): there is no code to type, and the app finds
-the PC again if its address changes.
+to confirm the pairing (first screenshot). From then on just press **Start** (second screenshot): there is no code to
+type, and the app finds the PC again if its address changes.
 
 <p align="center">
   <img src="docs/images/app-confirm.png" width="300"
