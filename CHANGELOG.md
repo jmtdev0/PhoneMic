@@ -1,5 +1,9 @@
 # Changelog
 
+### 29/10/2026
+* Fixed the QR code on the pairing page being cropped on its right side (and therefore not scannable): the SVG had a
+  fixed size and no viewBox, so the page CSS cropped it instead of scaling it. A test now guards against it.
+
 ### 27/10/2026
 * First version: HTTPS + WebSocket server with a pairing code, lockout after wrong codes and a local-network-only filter.
 * Phone page that captures the microphone (AudioWorklet, 20 ms chunks), keeps the screen awake and reconnects on its own.

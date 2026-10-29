@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import html
+import re
 import unittest
 from unittest import mock
 
@@ -189,6 +190,14 @@ class AdminPageTests(unittest.IsolatedAsyncioTestCase):
         await self.client.get("/")
         self.assertNotEqual(token, self.state.enrollment._token)
         self.assertFalse(self.state.enrollment.consume(token))
+
+    async def test_the_qr_svg_scales_instead_of_being_cropped_by_the_page_css(self):
+        # A fixed width/height without a viewBox is cropped (not scaled) when the CSS resizes it: an unscannable code.
+        page = await (await self.client.get("/")).text()
+        opening = re.search(r"<svg[^>]*>", page).group(0)
+        self.assertIn("viewBox=", opening)
+        self.assertNotIn("width=", opening)
+        self.assertNotIn("height=", opening)
 
     async def test_the_page_also_shows_the_link_as_text_for_when_scanning_fails(self):
         page = await (await self.client.get("/")).text()

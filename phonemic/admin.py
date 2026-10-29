@@ -28,7 +28,8 @@ def pairing_link(token: str, info: ServerInfo) -> str:
 
 
 def _qr_svg(link: str) -> str:
-    return segno.make(link, error="m").svg_inline(scale=5, border=2, dark="#111", light="#fff")
+    # omitsize: a viewBox instead of fixed width/height, so the page CSS can scale the code without cropping it.
+    return segno.make(link, error="m").svg_inline(scale=5, border=2, dark="#111", light="#fff", omitsize=True)
 
 
 def _devices_rows(state: ServerState) -> str:
