@@ -28,7 +28,7 @@ class DeviceRegistryTests(unittest.TestCase):
     def test_a_paired_phone_can_prove_who_it_is_and_others_cannot(self):
         registry = DeviceRegistry()
         phone, impostor = FakePhone(), FakePhone()
-        device = registry.add("S20 FE", phone.public_key_der)
+        device = registry.add("Pixel 6", phone.public_key_der)
         self.assertTrue(registry.verify(device.id, "abcd", phone.sign("abcd")))
         self.assertFalse(registry.verify(device.id, "abcd", impostor.sign("abcd")))
         self.assertFalse(registry.verify(device.id, "ffff", phone.sign("abcd")))  # signature for another challenge
@@ -49,7 +49,7 @@ class DeviceRegistryTests(unittest.TestCase):
     def test_revoked_phones_no_longer_verify(self):
         registry = DeviceRegistry()
         phone = FakePhone()
-        device = registry.add("S20 FE", phone.public_key_der)
+        device = registry.add("Pixel 6", phone.public_key_der)
         self.assertTrue(registry.revoke(device.id))
         self.assertFalse(registry.revoke(device.id))
         self.assertFalse(registry.verify(device.id, "abcd", phone.sign("abcd")))
@@ -58,7 +58,7 @@ class DeviceRegistryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "data" / "devices.json"
             phone = FakePhone()
-            device = DeviceRegistry(path).add("S20 FE", phone.public_key_der)
+            device = DeviceRegistry(path).add("Pixel 6", phone.public_key_der)
             reloaded = DeviceRegistry(path)
             self.assertEqual([d.id for d in reloaded.list()], [device.id])
             self.assertTrue(reloaded.verify(device.id, "abcd", phone.sign("abcd")))
@@ -68,13 +68,13 @@ class DeviceRegistryTests(unittest.TestCase):
 
     def test_touch_records_the_last_connection(self):
         registry = DeviceRegistry()
-        device = registry.add("S20 FE", FakePhone().public_key_der)
-        registry.touch(device.id, "192.168.1.37")
-        self.assertEqual(registry.get(device.id).last_address, "192.168.1.37")
+        device = registry.add("Pixel 6", FakePhone().public_key_der)
+        registry.touch(device.id, "10.73.41.37")
+        self.assertEqual(registry.get(device.id).last_address, "10.73.41.37")
         self.assertIsNotNone(registry.get(device.id).last_seen)
 
     def test_names_are_made_safe_for_display(self):
-        self.assertEqual(clean_name("S20 FE\x00\n de Javier"), "S20 FE de Javier")
+        self.assertEqual(clean_name("Pixel 6\x00\n of Sam"), "Pixel 6 of Sam")
         self.assertEqual(clean_name("   "), "Phone")
         self.assertEqual(clean_name(None), "Phone")
         self.assertEqual(len(clean_name("x" * 200)), 40)

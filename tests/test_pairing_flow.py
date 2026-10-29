@@ -45,7 +45,7 @@ class PairingFlowTests(unittest.IsolatedAsyncioTestCase):
         patcher = mock.patch("phonemic.server.AUTH_FAIL_DELAY_S", 0)
         patcher.start()
         self.addCleanup(patcher.stop)
-        self.info = ServerInfo(name="JMTDesktop25", port=8443, pin_hex=PIN, ips=("192.168.1.38",))
+        self.info = ServerInfo(name="MY-PC", port=8443, pin_hex=PIN, ips=("10.73.41.12",))
         self.app = create_app(CODE, factory, registry=DeviceRegistry(), enrollment=EnrollmentTokens(), info=self.info)
         self.state = self.app[STATE]
         self.client = TestClient(TestServer(self.app))
@@ -53,7 +53,7 @@ class PairingFlowTests(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(self.client.close)
         self.phone = FakePhone()
 
-    async def _enroll(self, token: str, phone: FakePhone | None = None, name: str = "S20 FE de Javier"):
+    async def _enroll(self, token: str, phone: FakePhone | None = None, name: str = "Pixel 6 of Sam"):
         phone = phone or self.phone
         return await self.client.post(
             "/enroll",
@@ -77,7 +77,7 @@ class PairingFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_pair_then_connect_and_stream_audio_without_any_code(self):
         device_id = await self._pair()
-        self.assertEqual(self.state.registry.get(device_id).name, "S20 FE de Javier")
+        self.assertEqual(self.state.registry.get(device_id).name, "Pixel 6 of Sam")
         ws = await self._connect_as(device_id)
         self.assertEqual((await ws.receive_json())["type"], "ready")
         await ws.send_bytes(np.arange(960, dtype="<i2").tobytes())
@@ -90,7 +90,7 @@ class PairingFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_the_enrollment_response_names_the_pc(self):
         response = await self._enroll(self.state.enrollment.create())
-        self.assertEqual((await response.json())["name"], "JMTDesktop25")
+        self.assertEqual((await response.json())["name"], "MY-PC")
 
     async def test_a_token_cannot_be_reused(self):
         token = self.state.enrollment.create()
@@ -175,7 +175,7 @@ class PairingFlowTests(unittest.IsolatedAsyncioTestCase):
 
 class AdminPageTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        info = ServerInfo(name="JMT<PC>", port=8443, pin_hex=PIN, ips=("192.168.1.38",))
+        info = ServerInfo(name="MY<PC>", port=8443, pin_hex=PIN, ips=("10.73.41.12",))
         self.app = create_app(CODE, FakeOutput, registry=DeviceRegistry(), enrollment=EnrollmentTokens(), info=info)
         self.state = self.app[STATE]
         self.client = TestClient(TestServer(create_admin_app(self.app)))
@@ -208,7 +208,7 @@ class AdminPageTests(unittest.IsolatedAsyncioTestCase):
         token = self.state.enrollment.create()
         link = pairing_link(token, self.state.info)
         self.assertTrue(link.startswith("phonemic://pair?"))
-        for part in (f"t={token}", f"p={PIN}", "h=192.168.1.38%3A8443", "v=1"):
+        for part in (f"t={token}", f"p={PIN}", "h=10.73.41.12%3A8443", "v=1"):
             self.assertIn(part, link)
 
     async def test_names_are_escaped_in_the_page(self):
@@ -216,15 +216,15 @@ class AdminPageTests(unittest.IsolatedAsyncioTestCase):
         page = await (await self.client.get("/")).text()
         self.assertNotIn("<script>alert(1)</script>", page)
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", page)
-        self.assertNotIn("JMT<PC>", page)
-        self.assertIn("JMT&lt;PC&gt;", page)
+        self.assertNotIn("MY<PC>", page)
+        self.assertIn("MY&lt;PC&gt;", page)
 
     async def test_requests_with_a_foreign_host_header_are_refused(self):
         response = await self.client.get("/", headers={"Host": "evil.example.com"})
         self.assertEqual(response.status, 403)
 
     async def test_changing_requests_need_the_custom_header(self):
-        device = self.state.registry.add("S20 FE", FakePhone().public_key_der)
+        device = self.state.registry.add("Pixel 6", FakePhone().public_key_der)
         self.assertEqual((await self.client.post(f"/api/devices/{device.id}/revoke")).status, 403)
         self.assertIsNotNone(self.state.registry.get(device.id))
         self.assertEqual((await self.client.post(f"/api/devices/{device.id}/revoke", headers={CSRF_HEADER: "1"})).status, 200)

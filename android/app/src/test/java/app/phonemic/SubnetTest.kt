@@ -10,13 +10,13 @@ class SubnetTest {
 
     @Test
     fun aSlash24ListsEveryOtherHost() {
-        val hosts = Subnet.candidates(ip(192, 168, 1, 38), 24)
+        val hosts = Subnet.candidates(ip(10, 73, 41, 38), 24)
         assertEquals(253, hosts.size)
-        assertEquals("192.168.1.1", hosts.first())
-        assertEquals("192.168.1.254", hosts.last())
-        assertFalse("192.168.1.38" in hosts)
-        assertFalse("192.168.1.0" in hosts)
-        assertFalse("192.168.1.255" in hosts)
+        assertEquals("10.73.41.1", hosts.first())
+        assertEquals("10.73.41.254", hosts.last())
+        assertFalse("10.73.41.38" in hosts)
+        assertFalse("10.73.41.0" in hosts)
+        assertFalse("10.73.41.255" in hosts)
     }
 
     @Test
@@ -28,9 +28,9 @@ class SubnetTest {
 
     @Test
     fun smallNetworksOnlyListTheirOwnHosts() {
-        assertEquals(listOf("192.168.1.9"), Subnet.candidates(ip(192, 168, 1, 10), 30).filter { it.endsWith(".9") })
-        val hosts = Subnet.candidates(ip(192, 168, 1, 10), 30) // 192.168.1.8/30: hosts .9 and .10
-        assertEquals(listOf("192.168.1.9"), hosts)
+        assertEquals(listOf("10.73.41.9"), Subnet.candidates(ip(10, 73, 41, 10), 30).filter { it.endsWith(".9") })
+        val hosts = Subnet.candidates(ip(10, 73, 41, 10), 30) // 10.73.41.8/30: hosts .9 and .10
+        assertEquals(listOf("10.73.41.9"), hosts)
     }
 
     @Test
