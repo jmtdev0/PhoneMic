@@ -18,6 +18,7 @@ from . import __version__
 from .admin import create_admin_app
 from .audio_out import AudioOutput, DeviceNotFoundError, find_output_device, output_devices
 from .certs import ensure_certificate, format_pin, key_pin_hex, local_ips
+from .claude_control import ClaudeRemote
 from .devices import DeviceRegistry, EnrollmentTokens
 from .server import ServerInfo, create_app
 
@@ -36,6 +37,9 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--prebuffer-ms", type=int, default=60, help="audio buffered before playback starts")
     parser.add_argument("--open", action="store_true", help="open the pairing page in the browser")
     parser.add_argument("--paired", action="store_true", help="list the paired phones and exit")
+    parser.add_argument(
+        "--check-claude", action="store_true", help="show what the PC can see of Claude Desktop's dictation and send buttons, then exit"
+    )
     parser.add_argument("--list-devices", action="store_true", help="list WASAPI playback devices and exit")
     return parser.parse_args(argv)
 
@@ -64,10 +68,17 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[{index}] {name}")
         return 0
 
+    if args.check_claude:
+        print("Looking at Claude Desktop (the first look can take a few seconds)...")
+        for line in ClaudeRemote().diagnostics():
+            print("  " + line)
+        return 0
+
     registry = DeviceRegistry(DATA_DIR / "devices.json")
     if args.paired:
         for device in registry.list():
-            print(f"{device.id}  {device.name}  paired {device.created_at[:10]}  last seen {device.last_seen or 'never'}")
+            allowed = ", ".join(key for key, value in device.permissions.items() if value) or "microphone only"
+            print(f"{device.id}  {device.name}  paired {device.created_at[:10]}  last seen {device.last_seen or 'never'}  [{allowed}]")
         if not registry.list():
             print("No phone is paired.")
         return 0
@@ -88,7 +99,14 @@ def main(argv: list[str] | None = None) -> int:
     code = args.code or f"{secrets.randbelow(10**6):06d}"
     prebuffer_ms = args.prebuffer_ms
     info = ServerInfo(name=socket.gethostname(), port=args.port, pin_hex=pin, ips=tuple(ips))
-    app = create_app(code, lambda rate: AudioOutput(device_index, rate, prebuffer_ms), registry=registry, enrollment=EnrollmentTokens(), info=info)
+    app = create_app(
+        code,
+        lambda rate: AudioOutput(device_index, rate, prebuffer_ms),
+        registry=registry,
+        enrollment=EnrollmentTokens(),
+        info=info,
+        controller=ClaudeRemote(),
+    )
     admin_app = create_admin_app(app)
     admin_url = f"http://127.0.0.1:{args.admin_port}"
 

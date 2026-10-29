@@ -14,7 +14,7 @@ import segno
 from aiohttp import web
 
 from .certs import format_pin
-from .server import STATE, ServerInfo, ServerState, is_loopback_address, revoke_device
+from .server import STATE, ServerInfo, ServerState, is_loopback_address, revoke_device, set_permissions
 
 ALLOWED_HOSTS = {"localhost", "127.0.0.1", "::1"}
 CSRF_HEADER = "X-PhoneMic"
@@ -41,11 +41,15 @@ def _devices_rows(state: ServerState) -> str:
             f"<td>{html.escape(device.name)}</td>"
             f"<td>{html.escape(device.created_at[:10])}</td>"
             f"<td>{seen}</td>"
+            f'<td><input type="checkbox" class="perm" data-id="{html.escape(device.id)}" data-kind="dictation"'
+            f'{" checked" if device.permissions["dictation"] else ""} aria-label="Allow dictation"></td>'
+            f'<td><input type="checkbox" class="perm" data-id="{html.escape(device.id)}" data-kind="send"'
+            f'{" checked" if device.permissions["send"] else ""} aria-label="Allow sending"></td>'
             f'<td><button class="revoke" data-id="{html.escape(device.id)}">Revoke</button></td>'
             "</tr>"
         )
     if not rows:
-        return '<tr><td colspan="4" class="muted">No phone is paired yet.</td></tr>'
+        return '<tr><td colspan="6" class="muted">No phone is paired yet.</td></tr>'
     return "".join(rows)
 
 
@@ -93,8 +97,11 @@ def render_page(state: ServerState, token: str) -> str:
 </section>
 <section>
   <h2>Paired phones</h2>
-  <table><thead><tr><th>Name</th><th>Paired</th><th>Last connection</th><th></th></tr></thead>
+  <table><thead><tr><th>Name</th><th>Paired</th><th>Last connection</th><th>Dictate</th><th>Send</th><th></th></tr></thead>
   <tbody id="devices">{_devices_rows(state)}</tbody></table>
+  <p class="muted">Dictate and Send let a phone press Claude Desktop's microphone and send buttons on this PC from the
+     app's buttons. Both are <b>off</b> until you tick them, and Send needs Dictate. A phone can only send after it
+     has dictated something itself.</p>
 </section>
 <section>
   <h2>This PC</h2>
@@ -116,6 +123,17 @@ document.querySelectorAll('.revoke').forEach((button) => button.addEventListener
   if (!confirm('Revoke this phone? It will have to be paired again.')) return;
   await fetch('/api/devices/' + button.dataset.id + '/revoke', {{ method: 'POST', headers: header }});
   location.reload();
+}}));
+document.querySelectorAll('.perm').forEach((box) => box.addEventListener('change', async () => {{
+  const row = box.closest('tr');
+  const dictation = row.querySelector('[data-kind=dictation]');
+  const send = row.querySelector('[data-kind=send]');
+  if (send.checked) dictation.checked = true;  // sending needs dictating
+  const response = await fetch('/api/devices/' + box.dataset.id + '/permissions', {{
+    method: 'POST', headers: {{ ...header, 'Content-Type': 'application/json' }},
+    body: JSON.stringify({{ dictation: dictation.checked, send: send.checked }}),
+  }});
+  if (!response.ok) location.reload();
 }}));
 let known = null;
 setInterval(async () => {{
@@ -158,6 +176,20 @@ async def _revoke(request: web.Request) -> web.StreamResponse:
     return web.json_response({"revoked": True})
 
 
+async def _permissions(request: web.Request) -> web.StreamResponse:
+    try:
+        body = await request.json()
+        dictation, send = body["dictation"], body["send"]
+        if not isinstance(dictation, bool) or not isinstance(send, bool):
+            raise TypeError("booleans expected")
+    except (ValueError, KeyError, TypeError):
+        raise web.HTTPBadRequest(text='Expected {"dictation": true|false, "send": true|false}.')
+    result = await set_permissions(request.app[STATE], request.match_info["device_id"], dictation=dictation, send=send)
+    if result is None:
+        raise web.HTTPNotFound(text="Unknown device.")
+    return web.json_response(result)
+
+
 def create_admin_app(phone_app: web.Application) -> web.Application:
     """The pairing page, sharing the phone-facing app's state (devices, tokens, active session)."""
     app = web.Application(middlewares=[_loopback_only])
@@ -165,4 +197,5 @@ def create_admin_app(phone_app: web.Application) -> web.Application:
     app.router.add_get("/", _page)
     app.router.add_get("/api/devices", _devices)
     app.router.add_post("/api/devices/{device_id}/revoke", _revoke)
+    app.router.add_post("/api/devices/{device_id}/permissions", _permissions)
     return app

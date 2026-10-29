@@ -12,8 +12,8 @@ android {
         minSdk = 26
         // 34 keeps the classic window layout; the app is sideloaded, so there is no store requirement.
         targetSdk = 34
-        versionCode = 3
-        versionName = "0.2.0"
+        versionCode = 4
+        versionName = "0.3.0"
     }
 
     buildTypes {

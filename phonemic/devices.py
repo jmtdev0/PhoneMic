@@ -14,7 +14,7 @@ import os
 import re
 import secrets
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
 
@@ -24,6 +24,8 @@ from cryptography.hazmat.primitives.asymmetric import ec
 
 AUTH_PREFIX = b"phonemic-auth-v1|"
 MAX_NAME_LENGTH = 40
+# What a paired phone may do on this PC besides being a microphone. Everything starts off.
+PERMISSIONS = ("dictation", "send")
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 
 
@@ -45,6 +47,13 @@ class Device:
     created_at: str
     last_seen: str | None = None
     last_address: str | None = None
+    # "dictation": press Claude Desktop's microphone button. "send": send the message (which implies dictation).
+    permissions: dict[str, bool] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.permissions = {key: bool(self.permissions.get(key, False)) for key in PERMISSIONS}
+        if self.permissions["send"]:
+            self.permissions["dictation"] = True
 
 
 class DeviceRegistry:
@@ -92,6 +101,15 @@ class DeviceRegistry:
             return False
         self._save()
         return True
+
+    def set_permissions(self, device_id: str, *, dictation: bool, send: bool) -> Device | None:
+        """Replace a phone's permissions. Sending needs dictating, so it switches dictation on too."""
+        device = self._devices.get(device_id)
+        if device is None:
+            return None
+        device.permissions = {"dictation": dictation or send, "send": send}
+        self._save()
+        return device
 
     def touch(self, device_id: str, address: str) -> None:
         device = self._devices.get(device_id)

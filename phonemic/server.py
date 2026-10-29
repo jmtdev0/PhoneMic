@@ -12,6 +12,14 @@ Close codes: 4400 malformed message, 4401 wrong code or signature, 4403 unknown 
 4409 replaced by a newer connection, 4500 audio error.
 
 POST /enroll swaps a one-time pairing token for a permanent device identity (see devices.py).
+
+Remote control (paired phones only, each permission off until it is switched on in the pairing page):
+  * {"type": "ready", "capabilities": {"dictation": bool, "send": bool}} tells the phone what it may do; the same
+    {"type": "capabilities", ...} is pushed again when the permissions change.
+  * The phone may send {"type": "control", "action": "dictation_start" | "dictation_stop" | "send"} and gets
+    {"type": "control_result", "action", "ok", "code", "message", "dictation"} back. Phones never send text: Claude
+    Desktop transcribes the audio they stream, and "send" presses its send button.
+  * Safeguards: one action at a time, a rate limit, and "send" only after this phone dictated something.
 """
 
 from __future__ import annotations
@@ -22,14 +30,17 @@ import binascii
 import hmac
 import ipaddress
 import logging
+import json
 import secrets
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Protocol
 
 from aiohttp import WSMsgType, web
 
+from .claude_control import ACTIONS, ControlResult
 from .devices import DeviceRegistry, EnrollmentTokens, clean_name
 from .pcm_queue import PcmQueue
 
@@ -43,6 +54,10 @@ STATS_INTERVAL_S = 2.0
 MAX_FAILED_ATTEMPTS = 5
 LOCKOUT_SECONDS = 60
 MIN_SAMPLE_RATE, MAX_SAMPLE_RATE = 8000, 96000
+MAX_CONTROLS_PER_MINUTE = 20
+MIN_CONTROL_INTERVAL_S = 0.5
+# The permission a control action needs.
+CONTROL_PERMISSION = {"dictation_start": "dictation", "dictation_stop": "dictation", "send": "send"}
 
 # Explicit list on purpose: ipaddress.is_private also accepts reserved and documentation ranges.
 LOCAL_NETWORKS = [
@@ -60,6 +75,12 @@ class Output(Protocol):
 
 
 OutputFactory = Callable[[int], Output]
+
+
+class Controller(Protocol):
+    """Operates Claude Desktop; see claude_control.ClaudeRemote."""
+
+    async def run(self, action: str) -> ControlResult: ...
 
 
 class PairingGuard:
@@ -132,6 +153,9 @@ class _Session:
     output: Output
     address: str
     device_id: str | None
+    control_times: deque = field(default_factory=deque)  # when this phone last used remote control
+    control_task: asyncio.Task | None = None  # at most one action at a time
+    dictated: bool = False  # this phone dictated something that has not been sent yet
 
 
 @dataclass
@@ -142,6 +166,8 @@ class ServerState:
     enrollment: EnrollmentTokens
     info: ServerInfo
     apk_path: Path = DEFAULT_APK
+    controller: Controller | None = None
+    clock: Callable[[], float] = time.monotonic
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     active: _Session | None = None
 
@@ -158,6 +184,83 @@ async def revoke_device(state: ServerState, device_id: str) -> bool:
         await session.ws.close(code=4403, message=b"revoked")
     log.info("Device %s revoked", device_id)
     return True
+
+
+def capabilities(state: ServerState, device_id: str | None) -> dict[str, bool]:
+    """What a connection may do; browser-page connections (no device) never control anything."""
+    device = state.registry.get(device_id) if device_id else None
+    permissions = device.permissions if device else {}
+    return {"dictation": bool(permissions.get("dictation")), "send": bool(permissions.get("send"))}
+
+
+async def set_permissions(state: ServerState, device_id: str, *, dictation: bool, send: bool) -> dict[str, bool] | None:
+    """Change what a phone may do and tell it right away if it is connected."""
+    device = state.registry.set_permissions(device_id, dictation=dictation, send=send)
+    if device is None:
+        return None
+    session = state.active
+    if session is not None and session.device_id == device_id and not session.ws.closed:
+        await session.ws.send_json({"type": "capabilities", "capabilities": device.permissions})
+    log.info("Permissions of %r set to %s", device.name, device.permissions)
+    return dict(device.permissions)
+
+
+async def _handle_control(state: ServerState, session: _Session, action: str | None) -> None:
+    """Run one remote-control action requested by a paired phone and answer it."""
+
+    async def reply(ok: bool, code: str, message: str, dictation: str | None = None) -> None:
+        if not session.ws.closed:
+            await session.ws.send_json(
+                {"type": "control_result", "action": action, "ok": ok, "code": code, "message": message, "dictation": dictation}
+            )
+
+    needed = CONTROL_PERMISSION.get(action or "")
+    if needed is None or action not in ACTIONS:
+        await reply(False, "bad_action", "Unknown action.")
+        return
+    allowed = capabilities(state, session.device_id)
+    if not allowed[needed]:
+        log.warning("Refused %s from device %s: no %r permission", action, session.device_id, needed)
+        await reply(False, "not_allowed", "This phone is not allowed to do that. Turn it on in the PC's pairing page.")
+        return
+    if state.controller is None:
+        await reply(False, "unavailable", "Remote control is not available on this PC.")
+        return
+    now = state.clock()
+    while session.control_times and now - session.control_times[0] > 60:
+        session.control_times.popleft()
+    if (session.control_times and now - session.control_times[-1] < MIN_CONTROL_INTERVAL_S) or len(session.control_times) >= MAX_CONTROLS_PER_MINUTE:
+        await reply(False, "rate_limited", "Too many actions too fast. Wait a moment.")
+        return
+    if action == "send" and not session.dictated:
+        await reply(False, "nothing_dictated", "Dictate something from this phone first.")
+        return
+    session.control_times.append(now)
+    log.info("Remote control: %s from device %s", action, session.device_id)
+    result = await state.controller.run(action)
+    if result.ok:
+        if action == "dictation_start":
+            session.dictated = True
+        elif action == "send":
+            session.dictated = False
+    await reply(result.ok, result.code, result.message, result.dictation)
+
+
+async def _handle_text(state: ServerState, session: _Session, raw: str) -> None:
+    """Text messages after the handshake: only remote-control requests, and only from paired phones."""
+    try:
+        message = json.loads(raw)
+    except ValueError:
+        return
+    if not isinstance(message, dict) or message.get("type") != "control" or session.device_id is None:
+        return
+    action = message.get("action") if isinstance(message.get("action"), str) else None
+    if session.control_task is not None and not session.control_task.done():
+        if not session.ws.closed:
+            await session.ws.send_json({"type": "control_result", "action": action, "ok": False, "code": "in_progress", "message": "Still working on the previous action.", "dictation": None})
+        return
+    # A separate task: pressing a button can take seconds and the audio must keep flowing meanwhile.
+    session.control_task = asyncio.create_task(_handle_control(state, session, action))
 
 
 async def _index(request: web.Request) -> web.StreamResponse:
@@ -307,16 +410,20 @@ async def _ws_handler(request: web.Request) -> web.StreamResponse:
         state.active = session
 
     log.info("Phone connected from %s (%d Hz)%s", address, sample_rate, f" as device {device_id}" if device_id else "")
-    await ws.send_json({"type": "ready"})
+    await ws.send_json({"type": "ready", "capabilities": capabilities(state, device_id)})
     stats_task = asyncio.create_task(_send_stats(session))
     try:
         async for message in ws:
             if message.type == WSMsgType.BINARY:
                 output.queue.push(message.data)
+            elif message.type == WSMsgType.TEXT:
+                await _handle_text(state, session, message.data)
             elif message.type == WSMsgType.ERROR:
                 break
     finally:
         stats_task.cancel()
+        if session.control_task is not None:
+            session.control_task.cancel()
         async with state.lock:
             if state.active is session:
                 state.active = None
@@ -341,6 +448,8 @@ def create_app(
     registry: DeviceRegistry | None = None,
     enrollment: EnrollmentTokens | None = None,
     info: ServerInfo | None = None,
+    controller: Controller | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> web.Application:
     app = web.Application(client_max_size=64 * 1024)
     app[STATE] = ServerState(
@@ -350,6 +459,8 @@ def create_app(
         enrollment=enrollment if enrollment is not None else EnrollmentTokens(),
         info=info if info is not None else ServerInfo(),
         apk_path=apk_path,
+        controller=controller,
+        clock=clock,
     )
     app.router.add_get("/", _index)
     app.router.add_get("/app.apk", _apk)

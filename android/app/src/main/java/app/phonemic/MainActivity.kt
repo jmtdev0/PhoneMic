@@ -37,6 +37,11 @@ class MainActivity : Activity() {
     private lateinit var statsView: TextView
     private lateinit var certView: TextView
     private lateinit var meter: ProgressBar
+    private lateinit var controlGroup: LinearLayout
+    private lateinit var dictateButton: Button
+    private lateinit var sendButton: Button
+    private lateinit var controlHint: TextView
+    private lateinit var controlStatusView: TextView
     private val ui = Handler(Looper.getMainLooper())
     private val refresh = object : Runnable {
         override fun run() {
@@ -96,6 +101,25 @@ class MainActivity : Activity() {
         pairedGroup.addView(pcView)
         toggle = Button(this).apply { setOnClickListener { onToggle() } }
         pairedGroup.addView(toggle, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+
+        // Remote control of Claude Desktop on the PC: only while streaming, and only what the PC allows this phone.
+        controlGroup = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        dictateButton = Button(this).apply { setOnClickListener { onDictate() } }
+        sendButton = Button(this).apply {
+            text = "Send"
+            setOnClickListener { MicService.control(MicService.SEND) }
+        }
+        controlGroup.addView(dictateButton, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        controlGroup.addView(sendButton, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        pairedGroup.addView(controlGroup, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        controlHint = label(12f, 4).apply {
+            setPadding(0, dp(8), 0, 0)
+            text = "Dictate and Send are off for this phone. Turn them on for it in the PC's pairing page " +
+                "to press Claude Desktop's microphone and send buttons from here."
+        }
+        pairedGroup.addView(controlHint)
+        controlStatusView = label(14f, 4).apply { setPadding(0, dp(8), 0, 0) }
+        pairedGroup.addView(controlStatusView)
         meter = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { max = 100 }
         pairedGroup.addView(meter, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(16) })
         statsView = label(12f, 8).apply { setPadding(0, dp(6), 0, dp(8)) }
@@ -123,6 +147,15 @@ class MainActivity : Activity() {
         toggle.text = if (MicState.running) "Stop" else "Start"
         pcView.text = "Paired with ${credentials.pcName}\nLast address: ${credentials.host}"
         statsView.text = MicState.stats
+        val live = MicState.running && MicState.ready
+        val anyControl = MicState.canDictate || MicState.canSend
+        controlGroup.visibility = if (live && anyControl) View.VISIBLE else View.GONE
+        controlHint.visibility = if (live && !anyControl) View.VISIBLE else View.GONE
+        controlStatusView.visibility = if (live && anyControl) View.VISIBLE else View.GONE
+        dictateButton.text = if (MicState.dictating) "Stop dictating" else "Dictate"
+        dictateButton.isEnabled = MicState.canDictate
+        sendButton.isEnabled = MicState.canSend
+        controlStatusView.text = MicState.controlStatus
         meter.progress = (MicState.level * 100).toInt().coerceIn(0, 100)
         MicState.level *= 0.85f
         certView.text = "PC key (compare with the PC window):\n${formatPin(credentials.pinHex.orEmpty())}"
@@ -215,6 +248,10 @@ class MainActivity : Activity() {
         } else {
             MicState.status = "The microphone permission is required."
         }
+    }
+
+    private fun onDictate() {
+        MicService.control(if (MicState.dictating) MicService.DICTATION_STOP else MicService.DICTATION_START)
     }
 
     private fun startStreaming() {

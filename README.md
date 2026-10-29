@@ -79,6 +79,23 @@ How pairing works:
 Build the app (JDK 21 from Android Studio, Android SDK 36) from `android/` with `JAVA_HOME` and `ANDROID_HOME` set:
 `.\gradlew.bat assembleDebug`. The APK lands in `android/app/build/outputs/apk/debug/app-debug.apk`.
 
+## Remote dictation (Claude Desktop)
+
+With the app streaming, the phone can also press Claude Desktop's **microphone** button and its **Send** button on the
+PC, so you can dictate a message and send it without touching the keyboard.
+
+- It is **off for every phone by default**. On the pairing page each paired phone has two checkboxes, **Dictate** and
+  **Send**; turning one on or off takes effect at once, even while the phone is connected. Send implies Dictate.
+- The phone shows **Dictate** (it becomes **Stop dictating**) and **Send** only for what the PC allows, and a hint
+  otherwise.
+- Send only works after a dictation made from that phone, and it never types or sends anything by itself: it presses
+  the same buttons you would. Presses are rate limited (20 a minute, one at a time) and the PC never logs your text.
+- It drives Claude Desktop through Windows UI Automation, with no keyboard shortcut and no screen coordinates. Buttons
+  are found by their English names (see `UiNames` in `phonemic/claude_control.py`), so a Claude Desktop update or
+  another language may break it. `python -m phonemic --check-claude` shows what PhoneMic can see.
+- Tested against a real Claude Desktop for the dictation toggle and the error paths; the final Send press needs an idle
+  chat with text in the box, so check it yourself the first time.
+
 ## Web page
 
 Open `https://<pc-ip>:8443` in Chrome on the phone, accept the certificate warning (*Advanced* -> *Proceed*), enter the
@@ -88,7 +105,7 @@ microphone. Keep the page open; the screen stays on.
 ## Options
 
 `--output` (playback device name fragment), `--port`, `--admin-port`, `--host`, `--code`, `--prebuffer-ms`, `--open`
-(open the pairing page), `--paired`, `--list-devices`.
+(open the pairing page), `--paired` (also shows each phone's permissions), `--check-claude`, `--list-devices`.
 
 ## Security
 
@@ -97,6 +114,8 @@ microphone. Keep the page open; the screen stays on.
   address out for a minute. Pairing tokens are guarded the same way.
 - The pairing page listens on `127.0.0.1` only, rejects unexpected `Host` headers and needs a custom header for
   changing requests, so a website open in your browser cannot drive it.
+- Controlling Claude Desktop is opt-in per phone, only works from a paired app (not the web page) and is checked on the PC for
+  every press, so revoking a permission or a phone stops it immediately.
 - The certificate and key are generated locally in `certs/`, the paired phones live in `data/`; both are ignored by git.
 
 ## License

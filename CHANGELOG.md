@@ -1,6 +1,11 @@
 # Changelog
 
 ### 29/10/2026
+* Version 0.3.0: remote dictation. The app has **Dictate** and **Send** buttons that press Claude Desktop's microphone
+  and send buttons on the PC through Windows UI Automation. Each is a separate permission, off by default, set per
+  paired phone on the pairing page and applied live. Send only works after a dictation from that phone; presses are
+  rate limited and `python -m phonemic --check-claude` reports what can be seen. New dependency: `comtypes`.
+  Tested with unit tests (86 in total), a live run against the real Claude Desktop and the app on an emulator.
 * Added three screenshots to the README (the pairing page, the pairing confirmation and the app streaming), taken with
   sample data from a throwaway demo server and an Android emulator so that no personal information appears in them.
 * Fixed the QR code on the pairing page being cropped on its right side (and therefore not scannable): the SVG had a

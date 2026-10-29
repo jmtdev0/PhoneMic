@@ -44,6 +44,17 @@ class MicService : Service() {
     private var client: OkHttpClient? = null
     @Volatile private var socket: WebSocket? = null
     @Volatile private var ready = false
+        set(value) {
+            field = value
+            MicState.ready = value
+            if (!value) {
+                // Without a live connection nothing can be controlled.
+                MicState.canDictate = false
+                MicState.canSend = false
+                MicState.dictating = false
+                MicState.controlStatus = ""
+            }
+        }
     @Volatile private var running = false
     private var captureThread: Thread? = null
     private var wakeLock: PowerManager.WakeLock? = null
@@ -80,6 +91,7 @@ class MicService : Service() {
             .build()
         running = true
         failures = 0
+        instance = this
         MicState.running = true
         MicState.stats = ""
         startCapture()
@@ -91,6 +103,7 @@ class MicService : Service() {
     override fun onDestroy() {
         running = false
         ready = false
+        if (instance === this) instance = null
         main.removeCallbacksAndMessages(null)
         socket?.cancel()
         socket = null
@@ -133,7 +146,13 @@ class MicService : Service() {
                     retryDelayMs = INITIAL_RETRY_MS
                     failures = 0
                     ready = true
+                    applyCapabilities(message.optJSONObject("capabilities"))
                     MicState.status = "Streaming to ${credentials.pcName}"
+                }
+                "capabilities" -> applyCapabilities(message.optJSONObject("capabilities"))
+                "control_result" -> {
+                    MicState.controlStatus = message.optString("message")
+                    if (!message.isNull("dictation")) MicState.dictating = message.optString("dictation") == "recording"
                 }
                 "error" -> MicState.status = "PC says: ${message.optString("reason")}"
                 "stats" -> MicState.stats =
@@ -164,6 +183,20 @@ class MicService : Service() {
             // The first failure, and every third after it, may mean the PC changed address: look for it.
             if (failures == 1 || failures % 3 == 0) lookForPc() else scheduleReconnect()
         }
+    }
+
+    private fun applyCapabilities(capabilities: JSONObject?) {
+        MicState.canDictate = capabilities?.optBoolean("dictation") == true
+        MicState.canSend = capabilities?.optBoolean("send") == true
+        if (!MicState.canDictate) MicState.dictating = false
+    }
+
+    /** Asks the PC to press a Claude Desktop button. The phone sends only the action, never text. */
+    private fun requestControl(action: String): Boolean {
+        val current = socket
+        if (!ready || current == null) return false
+        MicState.controlStatus = "…"
+        return current.send(JSONObject().put("type", "control").put("action", action).toString())
     }
 
     private fun lookForPc() {
@@ -291,6 +324,14 @@ class MicService : Service() {
 
     companion object {
         const val ACTION_STOP = "app.phonemic.STOP"
+        const val DICTATION_START = "dictation_start"
+        const val DICTATION_STOP = "dictation_stop"
+        const val SEND = "send"
+
+        @Volatile private var instance: MicService? = null
+
+        /** Ask the running service to have the PC press a Claude Desktop button; false when not connected. */
+        fun control(action: String): Boolean = instance?.requestControl(action) ?: false
 
         private const val SAMPLE_RATE = 48000
         private const val CHUNK_SAMPLES = 960            // 20 ms
